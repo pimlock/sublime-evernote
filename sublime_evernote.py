@@ -53,7 +53,7 @@ DEBUG = False
 
 def LOG(*args):
     if DEBUG:
-        print("Evernote:", *args)
+        print("Evernote:", str(*args).encode('ascii', 'replace').decode())
 
 
 def extractTags(tags):
