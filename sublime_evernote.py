@@ -78,19 +78,17 @@ def metadata_header(title="", tags=[], notebook="", **kw):
     return METADATA_HEADER % (title, json.dumps(tags, ensure_ascii=False), notebook)
 
 
-def append_to_view(view, text):
-    view.run_command('append', {
-        'characters': text,
-    })
-    return view
-
-
 def insert_to_view(view, text):
     view.run_command('insert', {
         'characters': text,
     })
     return view
 
+def replace_view_text(view, text):
+    view.run_command('replace_view_text', {
+        'characters': text
+    })
+    return view
 
 def find_syntax(lang, default=None):
     res = sublime.find_resources("%s.*Language" % lang)
@@ -620,6 +618,7 @@ class SendToEvernoteCommand(EvernoteDoText):
                     view.settings().set("$evernote", True)
                     view.settings().set("$evernote_guid", cnote.guid)
                     view.settings().set("$evernote_title", cnote.title)
+                    view.settings().set("$evernote_modified", view.change_count())
                     view.set_syntax_file(self.md_syntax)
                 self.message("Successfully posted note: guid:%s" % cnote.guid, 10000)
                 self.update_status_info(cnote)
@@ -666,7 +665,7 @@ class SaveEvernoteNoteCommand(EvernoteDoText):
 
         async_do(__update_note, "Updating note")
 
-    def is_enabled(self):
+    def is_enabled(self, **kw):
         if self.view.settings().get("$evernote_guid", False):
             return True
         return False
@@ -798,7 +797,11 @@ class OpenEvernoteNoteCommand(EvernoteDoWindow):
                     except Exception as e:
                         mdtxt = note.content
                         LOG("Conversion failed", e)
-                newview = self.window.new_file()
+
+                if unk_args.get('open_new_file', True) == False:
+                    newview = self.window.active_view()
+                else:
+                    newview = self.window.new_file()
                 newview.settings().set("$evernote", True)
                 newview.settings().set("$evernote_guid", note.guid)
                 newview.settings().set("$evernote_title", note.title)
@@ -810,7 +813,7 @@ class OpenEvernoteNoteCommand(EvernoteDoWindow):
                 note_contents = note.content
             newview.set_syntax_file(syntax)
             newview.set_scratch(True)
-            append_to_view(newview, note_contents)
+            replace_view_text(newview, note_contents)
             newview.show(0)
             self.message('Note "%s" opened!' % note.title)
             self.update_status_info(note, newview)
@@ -893,7 +896,7 @@ class InsertLinkToEvernoteNote(OpenEvernoteNoteCommand):
         mdlink = '[{}]({})'.format(title, link)
         insert_to_view(self.view, mdlink)
 
-    def is_enabled(self):
+    def is_enabled(self, **kw):
         return bool(self.window.active_view().settings().get('$evernote', False))
 
 
@@ -943,7 +946,7 @@ class OpenLinkedEvernoteNote(EvernoteDoText):
     def is_visible(self):
         return bool(self.view.settings().get('$evernote', False))
 
-    def is_enabled(self):
+    def is_enabled(self, **kw):
         return (self.view.settings().get('$evernote', False) and
                 self.find_note_link_guid() is not None)
 
@@ -971,7 +974,7 @@ class ListLinkedEvernoteNotes(EvernoteDoText):
 
         self.view.window().show_quick_panel(linktitles, open_link)
 
-    def is_enabled(self):
+    def is_enabled(self, **kw):
         return bool(self.view.settings().get('$evernote', False))
 
 
@@ -982,9 +985,29 @@ class ViewInEvernoteClientCommand(EvernoteDoText):
         LOG('Launching Evernote client with link', notelink)
         open_file_with_app(notelink)
 
-    def is_enabled(self):
+    def is_enabled(self, **kw):
         return bool(self.view.settings().get("$evernote_guid", False))
 
+
+class RevertToEvernoteCommand(OpenEvernoteNoteCommand):
+
+    def do_run(self, **kwargs):
+        open_new_file = False
+        if self.view.change_count() > self.view.settings().get("$evernote_modified"):
+            answer = sublime.yes_no_cancel_dialog("Note has been modified and reverting to version from Evernote will replace it's contents. Do you want to replace?", "Replace", "Open in new tab")
+            if answer == sublime.DIALOG_NO:
+                open_new_file = True
+            elif answer == sublime.DIALOG_CANCEL:
+                return
+
+        note_guid = self.view.settings().get("$evernote_guid")
+        self.open_note(note_guid, open_new_file=open_new_file, **kwargs)
+        self.message("Loading note, please wait...")
+
+    def is_enabled(self):
+        if self.window.active_view().settings().get("$evernote_guid", False):
+            return True
+        return False
 
 class EvernoteInsertAttachment(EvernoteDoText):
 
@@ -1047,7 +1070,7 @@ class EvernoteInsertAttachment(EvernoteDoText):
 
             async_do(upload_async, "Uploading attachment")
 
-        def is_enabled(self):
+        def is_enabled(self, **kw):
             if self.view.settings().get("$evernote_guid", False):
                 return True
             return False
@@ -1110,7 +1133,7 @@ class EvernoteShowAttachments(EvernoteDoText):
             else:
                 self.message("Note has no attachments")
 
-        def is_enabled(self):
+        def is_enabled(self, **kw):
             if self.view.settings().get("$evernote_guid", False):
                 return True
             return False
@@ -1122,7 +1145,7 @@ class ViewInEvernoteWebappCommand(sublime_plugin.TextCommand):
         url = self.view.settings().get("noteStoreUrl")[0:-9] + "view/%s"
         webbrowser.open_new_tab(url % self.view.settings().get("$evernote_guid"))
 
-    def is_enabled(self):
+    def is_enabled(self, **kw):
         if self.view.settings().get("$evernote_guid", False):
             return True
         return False
@@ -1172,6 +1195,12 @@ class ClearEvernoteCacheCommand(sublime_plugin.WindowCommand):
         LOG("Cache cleared!")
 
 
+class ReplaceViewTextCommand(sublime_plugin.TextCommand):
+    def run(self, edit, characters):
+        self.view.erase(edit, sublime.Region(0, self.view.size()))
+        self.view.insert(edit, 0, characters)
+
+
 class EvernoteListener(EvernoteDo, sublime_plugin.EventListener):
 
     settings = {}
@@ -1183,7 +1212,7 @@ class EvernoteListener(EvernoteDo, sublime_plugin.EventListener):
     def on_pre_close(self, view):
         if self.settings.get("warn_on_close") and \
            view and view.settings().get("$evernote") and \
-           view.change_count() > view.settings().get("$evernote_modified"):
+           view.change_count() > view.settings().get("$evernote_modified", 0):
             # There is no API to cancel the closing of a view
             # so we let Sublime close it but clone it first and then ask the user.
             choices = ["Close and discard changes", "Save to Evernote and close"]
@@ -1192,9 +1221,14 @@ class EvernoteListener(EvernoteDo, sublime_plugin.EventListener):
             if not cloned:
                 return
 
+            guid = view.settings().get("$evernote_guid")
+
             def on_choice(i):
                 if i == 1:
-                    cloned.run_command("save_evernote_note")
+                    if guid:
+                        cloned.run_command("save_evernote_note")
+                    else:
+                        cloned.run_command("send_to_evernote")
                 if i >= 0:
                     cloned.settings().set("$evernote_modified", cloned.change_count())
                     cloned.close()
